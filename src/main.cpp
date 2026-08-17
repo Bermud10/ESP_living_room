@@ -54,6 +54,8 @@ void setup() {
     Serial.print("Попытка инициализации BME280 (");
     Serial.print(i);
 
+    Wire.begin(5, 4);
+
     if (bme.begin(0x76)) {
       sensorFound = true;
       Serial.println("Датчик найден!");
