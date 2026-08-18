@@ -25,7 +25,7 @@ Adafruit_BME280 bme;
 
 //NTP клиент для синхронизации времени
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 18000, 60000); 
+NTPClient timeClient(ntpUDP, "ru.pool.ntp.org", 0, 60000); 
 // 10800 = UTC+3 (московское время), 60000 = обновление раз в минуту
 
 unsigned long lastMsg = 0;
@@ -137,6 +137,10 @@ void loop() {
       
       //Получаем Unix timestamp (секунды с 01.01.1970)
       unsigned long timestamp = timeClient.getEpochTime();
+
+      if (timestamp < 1700000000) { // Примерно до 2023 года
+         Serial.println("⚠️ Внимание: Timestamp некорректен, NTP не сработал!");
+      }
       
       //  Формируем JSON с данными и временем
       snprintf(msg, sizeof(msg), 
