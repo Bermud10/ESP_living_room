@@ -15,21 +15,26 @@ const int mqtt_port = 9991;
 const char* mqtt_user = "user_1d18b030";
 const char* mqtt_password = "1bz78-sYP3T8u";
 
-const char* topic_temp = "user_1d18b030/room/temp";
-const char* topic_humidity = "user_1d18b030/room/humidity";
-const char* topic_pressure = "user_1d18b030/room/pressure";
+const char* topic_data = "user_1d18b030/room/data";
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 Adafruit_BME280 bme;
 
-//NTP клиент для синхронизации времени
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "ru.pool.ntp.org", 0, 60000); 
-// 10800 = UTC+3 (московское время), 60000 = обновление раз в минуту
 
 unsigned long lastMsg = 0;
-char msg[100]; 
+char msg[150];
+
+// Функция безопасного ожидания (кормит сторожевой таймер)
+void safeDelay(unsigned long ms) {
+  unsigned long start = millis();
+  while (millis() - start < ms) {
+    delay(10);
+    yield();  //Предотвращает перезагрузку WDT
+  }
+}
 
 void reconnect() {
   byte tries = 10;
@@ -44,86 +49,88 @@ void reconnect() {
       Serial.print("failed, rc=");
       Serial.print(client.state());
       Serial.println(" try again in 5 seconds");
-      delay(5000);
+      safeDelay(5000); // Используем безопасную задержку
     }
+  }
+  
+  if (!client.connected()) {
+    Serial.println("❌ Не удалось подключиться к MQTT. Ждем 10 секунд...");
+    safeDelay(10000);
   }
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  safeDelay(1000); // Безопасная задержка при старте
   
   Serial.println("\n=== Комнатный датчик (BME280) ===");
   
-  Wire.begin(5, 4);
+  Wire.begin(5, 4); // SDA=D1, SCL=D2
   
-  int maxRetries = 5;
-  bool sensorFound = false;
-  for (int i = 1; i <= maxRetries; i++) {
-    Serial.print("Попытка инициализации BME280 (");
-    Serial.print(i);
-    Serial.println(" из 5)...");
-    if (bme.begin(0x76)) {
-      sensorFound = true;
-      Serial.println("✅ Датчик найден!");
-      break;
-    }
-    Serial.println("❌ Не удалось найти датчик.");
-    delay(1000);
-  }
-  if (!sensorFound) {
-    Serial.println("🛑 Датчик не найден! Программа остановлена.");
-    while (1) delay(10);
+  // 1. Инициализация датчика
+  if (!bme.begin(0x76)) {
+    Serial.println("Датчик BME280 не найден!");
+  } else {
+    Serial.println("Датчик BME280 найден!");
   }
   
-  WiFi.begin(ssid, password);
+  // 2. Подключение к Wi-Fi с защитой от зависания
   Serial.print("Connecting to WiFi");
-  byte trys = 10;
-  while (--trys && WiFi.status() != WL_CONNECTED) {
-    delay(500);
+  WiFi.begin(ssid, password);
+  int wifiAttempts = 0;
+  while (WiFi.status() != WL_CONNECTED && wifiAttempts < 20) {
     Serial.print(".");
+    safeDelay(500);
+    wifiAttempts++;
   }
+
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("\n🛑 Ошибка WiFi. Программа остановлена.");
-    while (1) delay(10);
+    Serial.println("\n🛑 Ошибка WiFi. Перезагрузка через 5 секунд...");
+    safeDelay(5000);
+    ESP.restart();
   }
+  
   Serial.println("\n✅ WiFi connected");
-  Serial.print("IP: ");
+  Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
   
-  //Синхронизация времени через NTP
-  Serial.println(" Синхронизация времени через NTP...");
+  // 3. Синхронизация времени (НЕБЛОКИРУЮЩАЯ)
+  Serial.println("Синхронизация времени через NTP...");
   timeClient.begin();
-  int ntpRetries = 0;
-  while (!timeClient.update() && ntpRetries < 10) {
-    timeClient.forceUpdate();
-    delay(500);
-    ntpRetries++;
+  bool timeSynced = false;
+  for (int i = 1; i <= 5; i++) {
+    if (timeClient.update()) {
+      timeSynced = true;
+      break;
+    }
+    safeDelay(500);
   }
   
-  if (timeClient.isTimeSet()) {
+  if (timeSynced) {
     Serial.print("✅ Время синхронизировано: ");
     Serial.println(timeClient.getFormattedTime());
   } else {
-    Serial.println("️ Не удалось синхронизировать время, используем uptime");
+    Serial.println("Не удалось синхронизировать время. Продолжаем работу без NTP.");
   }
   
+  // 4. Настройка MQTT
   client.setServer(mqtt_server, mqtt_port);
-  client.setSocketTimeout(10);
+  client.setSocketTimeout(10); // Увеличиваем таймаут для медленных сетей
 }
 
 void loop() {
+  // Поддержание соединения MQTT
   if (!client.connected()) {
     reconnect();
   }
   client.loop();
   
-  // Обновляем время каждый цикл
+  // Обновляем время в фоне (библиотека сама решит, нужно ли делать запрос)
   timeClient.update();
   
   if (client.connected()) {
     unsigned long now = millis();
-    if (now - lastMsg > 30000) {
+    if (now - lastMsg > 1200000) { // Отправка каждые 2 минуты
       lastMsg = now;
       
       float temperature = bme.readTemperature();
@@ -131,30 +138,23 @@ void loop() {
       float pressure = bme.readPressure() / 100.0F;
       
       if (isnan(temperature) || isnan(humidity)) {
-        Serial.println("❌ Ошибка чтения датчика");
+        Serial.println("❌ Ошибка чтения датчика BME280");
         return;
       }
       
-      //Получаем Unix timestamp (секунды с 01.01.1970)
       unsigned long timestamp = timeClient.getEpochTime();
-
-      if (timestamp < 1700000000) { // Примерно до 2023 года
-         Serial.println("⚠️ Внимание: Timestamp некорректен, NTP не сработал!");
-      }
       
-      //  Формируем JSON с данными и временем
       snprintf(msg, sizeof(msg), 
         "{\"temp\":%.2f,\"hum\":%.2f,\"press\":%.1f,\"ts\":%lu}",
         temperature, humidity, pressure, timestamp
       );
       
-      // Отправляем JSON в один топик (или можно разбить на несколько)
-      client.publish("user_1d18b030/room/data", msg, true);
-      
-      Serial.print("📤 Отправлено: ");
-      Serial.println(msg);
-      Serial.print("   Время измерения: ");
-      Serial.println(timeClient.getFormattedTime());
+      if (client.publish(topic_data, msg, true)) {
+        Serial.print("📤 Отправлено: ");
+        Serial.println(msg);
+      } else {
+        Serial.println("❌ Ошибка публикации MQTT!");
+      }
       Serial.println("---");
     }
   }
