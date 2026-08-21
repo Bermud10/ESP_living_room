@@ -130,7 +130,7 @@ void loop() {
   
   if (client.connected()) {
     unsigned long now = millis();
-    if (now - lastMsg > 1200000) { // Отправка каждые 2 минуты
+    if (now - lastMsg > 120000) { // Отправка каждые 2 минуты
       lastMsg = now;
       
       float temperature = bme.readTemperature();
